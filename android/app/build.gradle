@@ -28,8 +28,10 @@ android {
 }
 
 def copyLicenses = tasks.register('copyLicenses', Copy) {
-    from rootProject.file('../LICENSE.md')
-    from rootProject.file('../external/dsp56300/LICENSE.md') { rename { 'DSP56300-LICENSE.md' } }
-    into layout.buildDirectory.dir('generated/licenseAssets')
+    from(rootProject.file('../LICENSE.md'))
+    from(rootProject.file('../external/dsp56300/LICENSE.md')) {
+        rename { 'DSP56300-LICENSE.md' }
+    }
+    into(layout.buildDirectory.dir('generated/licenseAssets'))
 }
 tasks.named('preBuild').configure { dependsOn copyLicenses }
