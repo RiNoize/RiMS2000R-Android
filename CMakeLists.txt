@@ -11,6 +11,11 @@ endif()
 
 project(KorgMS2000 VERSION 0.9.8 LANGUAGES CXX)
 
+# Android: link the static emulation core into a shared native library.
+if(ANDROID)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 # MAC-4: a plugin lives in a host that has its own JUCE (or its own anything), and macOS coalesces every exported
 # weak symbol across the loaded images - the host's and the plugin's JUCE then ran each other's inline code (measured:
 # a ValueTree freed with the wrong allocator in getStateInformation). Nothing but the entry points is exported.
@@ -240,6 +245,18 @@ target_link_libraries(ms2000
     dsp56kEmu
     ${CMAKE_THREAD_LIBS_INIT}
 )
+
+# RiMS2000R Alpha 0.1.0: first prove the ARM64 core builds and links.
+# Do not configure desktop apps, VST3, or platform-specific test binaries.
+if(ANDROID)
+    target_compile_definitions(ms2000 PRIVATE MS2K_EMULATE_MCU)
+    add_library(rims2000r_native SHARED android/native/rims2000r_probe.cpp)
+    target_include_directories(rims2000r_native PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/source")
+    target_link_libraries(rims2000r_native PRIVATE ms2000 log)
+    set_target_properties(rims2000r_native PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+    message(STATUS "RiMS2000R: ARM64 native engine bootstrap (no APK or Android audio yet)")
+    return()
+endif()
 
 # ESSENTIAL EXECUTABLES ONLY (1 total - only ms2000_emulator.exe as requested)
 

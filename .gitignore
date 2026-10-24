@@ -14,3 +14,15 @@ thin_gui.ini
 dumps/
 *.wav
 *.log
+
+# RiMS2000R: never upload licensed ROM dumps or per-user flash state
+**/flash.bin
+**/boot-362*.bin
+**/hd44780_a00.bin
+**/ms2000_flash_state.bin
+**/ms2000_flash_state.sectors
+
+# Android native build output
+build/android-*/
+android/.cxx/
+android/.gradle/

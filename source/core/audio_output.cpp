@@ -12,7 +12,7 @@
 #pragma comment(lib, "dsound.lib")
 #pragma comment(lib, "dxguid.lib")
 #pragma comment(lib, "winmm.lib")
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(__ANDROID__)
 #include <alsa/asoundlib.h>
 #elif defined(__APPLE__)
 #include <CoreAudio/CoreAudio.h>
@@ -32,7 +32,7 @@ struct AudioOutput::PlatformData {
     DWORD writePosition;
     DWORD playPosition;
     HANDLE bufferEvent;
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(__ANDROID__)
     snd_pcm_t* pcmHandle;
     snd_pcm_hw_params_t* hwParams;
     snd_pcm_sw_params_t* swParams;
@@ -125,7 +125,7 @@ std::vector<AudioDeviceInfo> AudioOutput::getAvailableDevices() {
             devices.push_back(defaultDevice);
         }
     }
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(__ANDROID__)
     // Enumerate ALSA devices
     char** hints;
     int err = snd_device_name_hint(-1, "pcm", (void***)&hints);
@@ -466,7 +466,7 @@ uint32_t AudioOutput::writePlatformAudio(const float* data, uint32_t frames) {
     return 0;
 }
 
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(__ANDROID__)
 
 bool AudioOutput::initializePlatformAudio() {
     auto& pd = *m_platformData;

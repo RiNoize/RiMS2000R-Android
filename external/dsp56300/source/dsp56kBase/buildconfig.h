@@ -11,3 +11,8 @@
 #if defined(__aarch64__) || defined(__ARM_ARCH_8) || defined(_M_ARM64)
 #	define HAVE_ARM64
 #endif
+
+// Android ARM64: non-MSVC equivalent used by the DSP JIT diagnostics.
+#if !defined(_MSC_VER) && !defined(_ReturnAddress)
+#  define _ReturnAddress() __builtin_return_address(0)
+#endif
