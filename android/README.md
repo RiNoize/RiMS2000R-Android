@@ -7,9 +7,9 @@
 Se requieren Android NDK r27c (`27.2.12479018`), Ninja y CMake. Desde la raíz del proyecto:
 
 ```bash
-cmake -S . -B build/android-arm64 -G Ninja \\
-  -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/27.2.12479018/build/cmake/android.toolchain.cmake" \\
-  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \\
+cmake -S . -B build/android-arm64 -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/27.2.12479018/build/cmake/android.toolchain.cmake" \
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
   -DANDROID_STL=c++_static -DCMAKE_BUILD_TYPE=Release
 cmake --build build/android-arm64 --target rims2000r_native --parallel 2
 ```
