@@ -1,12 +1,22 @@
-# RiMS2000R Android — Alpha 0.1.0
+# RiMS2000R Android — Alpha 0.1.1
 
 Primera aplicación instalable de diagnóstico para Android ARM64 (mínimo Android 8 / API 26). Conserva el núcleo H8S/2350 + DSP56362 y ejecuta firmware aportado por el usuario. **Una compilación correcta no demuestra que arranque, suene bien o rinda a tiempo real en la Galaxy Tab A9. La validación física sigue pendiente.**
 
+## Corrección de interfaz en 0.1.1
+
+- Reserva dinámicamente el espacio de las barras de estado/navegación, la barra de tareas y los recortes de pantalla. No se ocultan las barras ni se supone una altura fija.
+- **Copiar diagnóstico** queda en la cabecera fija, fuera del desplazamiento. Se mantiene el acceso al final del diagnóstico.
+- Los controles y el diagnóstico siguen siendo desplazables dentro de la zona segura, también al cambiar la altura disponible.
+- La versión mostrada y la copiada se obtienen de `BuildConfig.VERSION_NAME`.
+- No se modifican el motor nativo, la síntesis, los buffers, MIDI ni la importación de firmware. Se mantiene el identificador de aplicación para actualizar conservando ROMs y preferencias, siempre que se use la misma firma.
+
+Validación visual definitiva pendiente en la Galaxy Tab A9: comprobar botón superior fijo, reloj sin solapamiento y fila inferior por encima de la barra de tareas.
+
 ## Obtener y probar la APK
 
-En GitHub Actions, abrir una ejecución exitosa de **Android APK Alpha** y descargar el artefacto **RiMS2000R-Android-0.1.0-alpha-APK**. Contiene el APK de desarrollo firmado, código fuente del mismo commit y sumas SHA-256. La antigua acción `Android ARM64 native build` sigue produciendo solo una biblioteca `.so`.
+En GitHub Actions, abrir una ejecución exitosa de **Android APK Alpha** y descargar el artefacto **RiMS2000R-Android-0.1.1-alpha-APK**. Contiene el APK de desarrollo firmado, código fuente del mismo commit y sumas SHA-256. La antigua acción `Android ARM64 native build` sigue produciendo solo una biblioteca `.so`.
 
-1. Instalar `RiMS2000R-Android-0.1.0-alpha.apk`.
+1. Instalar `RiMS2000R-Android-0.1.1-alpha.apk`.
 2. Pulsar **Importar ROMs (ZIP)** y seleccionar un ZIP propio con `flash.bin` (1.048.576 bytes), `boot-362.bin` o `boot-362.ms2000.bin` (768 bytes). Opcional: `hd44780_a00.bin` (4.096 bytes). Se admiten subcarpetas como `full FW`; no se admiten archivos RAR directamente.
 3. Elegir **512 muestras** y la salida de la tablet o sus auriculares. Dejar desactivado **DSP en otro hilo** para la primera prueba.
 4. Pulsar **Arrancar**. Tras cuatro segundos de tiempo emulado se habilitan las notas. Comprobar el LCD y mantener pulsado **Do** o **4 notas**; empezar con volumen moderado.

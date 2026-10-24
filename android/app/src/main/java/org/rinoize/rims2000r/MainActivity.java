@@ -85,13 +85,22 @@ public final class MainActivity extends Activity {
         return s;
     }
     private void buildUi() {
-        ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true);
-        LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(dp(12),dp(8),dp(12),dp(8));
-        root.setBackgroundColor(Color.rgb(19,25,33)); scroll.addView(root); setContentView(scroll);
+        // The header is outside the scrollable content: diagnostics remain reachable
+        // even when the log is long or Samsung's taskbar changes the usable height.
+        LinearLayout frame = new LinearLayout(this); frame.setOrientation(LinearLayout.VERTICAL);
+        frame.setPadding(dp(12),dp(8),dp(12),dp(8)); frame.setBackgroundColor(Color.rgb(19,25,33));
         LinearLayout title = row();
-        TextView heading = text("RiMS2000R  ·  Alpha 0.1.0", 23); heading.setTypeface(null, Typeface.BOLD);
+        TextView heading = text("RiMS2000R  ·  " + BuildConfig.VERSION_NAME, 20); heading.setTypeface(null, Typeface.BOLD);
         title.addView(heading, new LinearLayout.LayoutParams(0,-2,1));
-        title.addView(button("Acerca de", v -> about())); root.addView(title);
+        Button copy = button("Copiar diagnóstico", v -> copyDiagnostic());
+        copy.setMinHeight(dp(48)); copy.setMinWidth(dp(168)); title.addView(copy);
+        title.addView(button("Acerca de", v -> about())); frame.addView(title);
+        ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true);
+        LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(0,dp(4),0,dp(8)); scroll.addView(root);
+        frame.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,0,1));
+        setContentView(frame);
+        SafeAreaInsets.install(getWindow(),frame);
         firmware = text("", 14); root.addView(firmware);
         LinearLayout toolbar = row();
         importButton = button("Importar ROMs (ZIP)", v -> pickFirmware());
@@ -248,7 +257,7 @@ public final class MainActivity extends Activity {
         firmware.setText(FirmwareImporter.ready(romDirectory)?"ROMs importadas · flash 1 MB + arranque DSP · pantalla encendida mientras usás la app":"Sin ROMs · importar un ZIP con flash.bin y boot-362.bin (o boot-362.ms2000.bin)");
     }
     private void copyDiagnostic() {
-        String s="RiMS2000R 0.1.0-alpha\n"+Build.MANUFACTURER+" "+Build.MODEL+" · Android "+Build.VERSION.RELEASE+"\n"+NativeBridge.stats()+"\n"+midi.description();
+        String s="RiMS2000R " + BuildConfig.VERSION_NAME + "\n"+Build.MANUFACTURER+" "+Build.MODEL+" · Android "+Build.VERSION.RELEASE+"\n"+NativeBridge.stats()+"\n"+midi.description();
         ((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("RiMS2000R diagnóstico",s));
         Toast.makeText(this,"Diagnóstico copiado",Toast.LENGTH_SHORT).show();
     }

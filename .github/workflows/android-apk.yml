@@ -50,15 +50,15 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/android
-          cp android/app/build/outputs/apk/debug/app-debug.apk dist/android/RiMS2000R-Android-0.1.0-alpha.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/android/RiMS2000R-Android-0.1.1-alpha.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose dist/android/*.apk
           unzip -l dist/android/*.apk | grep 'lib/arm64-v8a/librims2000r_native.so'
           if unzip -l dist/android/*.apk | grep -Ei 'flash\.bin|boot-362|hd44780_a00'; then echo 'ROM included unexpectedly'; exit 1; fi
-          git archive --format=zip --output=dist/android/RiMS2000R-Android-0.1.0-source.zip HEAD
+          git archive --format=zip --output=dist/android/RiMS2000R-Android-0.1.1-source.zip HEAD
           (cd dist/android && sha256sum *.apk *.zip > SHA256SUMS.txt)
       - uses: actions/upload-artifact@v4
         with:
-          name: RiMS2000R-Android-0.1.0-alpha-APK
+          name: RiMS2000R-Android-0.1.1-alpha-APK
           path: dist/android/*
           if-no-files-found: error
           retention-days: 90
