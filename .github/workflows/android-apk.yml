@@ -1,0 +1,64 @@
+name: Android APK Alpha
+on:
+  push:
+    branches: ['android/**']
+    paths: ['android/**', 'source/**', 'external/**', 'CMakeLists.txt', '.github/workflows/android-apk.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: rims-apk-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Preserve development signing key between builds
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: rims2000r-development-signing-v1
+      - name: Install pinned Android SDK components
+        shell: bash
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+          test -n "$SDKMANAGER"
+          "$SDKMANAGER" --install 'ndk;27.2.12479018' 'platforms;android-35' 'build-tools;35.0.0' 'cmake;3.22.1'
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+      - name: Test audio FIFO, MIDI framing and safe firmware import on host
+        run: |
+          c++ -std=c++17 -O2 -pthread android/tests/audio_fifo_test.cpp -o /tmp/rims-fifo-test
+          /tmp/rims-fifo-test
+          mkdir -p /tmp/rims-java-tests
+          javac -d /tmp/rims-java-tests android/app/src/main/java/org/rinoize/rims2000r/FirmwareImporter.java android/app/src/main/java/org/rinoize/rims2000r/MidiFramer.java android/tests/CoreTests.java
+          java -cp /tmp/rims-java-tests org.rinoize.rims2000r.CoreTests
+      - name: Build installable ARM64 APK
+        run: gradle -p android :app:assembleDebug --no-daemon --stacktrace
+      - name: Verify package and preserve corresponding source
+        shell: bash
+        run: |
+          mkdir -p dist/android
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/android/RiMS2000R-Android-0.1.0-alpha.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose dist/android/*.apk
+          unzip -l dist/android/*.apk | grep 'lib/arm64-v8a/librims2000r_native.so'
+          if unzip -l dist/android/*.apk | grep -Ei 'flash\.bin|boot-362|hd44780_a00'; then echo 'ROM included unexpectedly'; exit 1; fi
+          git archive --format=zip --output=dist/android/RiMS2000R-Android-0.1.0-source.zip HEAD
+          (cd dist/android && sha256sum *.apk *.zip > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RiMS2000R-Android-0.1.0-alpha-APK
+          path: dist/android/*
+          if-no-files-found: error
+          retention-days: 90
