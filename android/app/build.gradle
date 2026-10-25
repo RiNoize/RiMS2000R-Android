@@ -1,12 +1,16 @@
 plugins { id 'com.android.application' }
 
+// Optional A/B build: never replaces an installed alpha or its private ROM/state.
+def parallelTest = providers.gradleProperty('rimsPerfSideBySide').orElse('false').get().toBoolean()
+
 android {
     namespace 'org.rinoize.rims2000r'
     compileSdk 35
     buildFeatures { buildConfig true }
     ndkVersion '27.2.12479018'
     defaultConfig {
-        applicationId 'org.rinoize.rims2000r'
+        applicationId(parallelTest ? 'org.rinoize.rims2000r.perftest' : 'org.rinoize.rims2000r')
+        manifestPlaceholders = [rimsLabel: parallelTest ? 'RiMS2000R Perf Test' : 'RiMS2000R Alpha']
         minSdk 26
         targetSdk 35
         versionCode 3
@@ -20,7 +24,7 @@ android {
         }
     }
     externalNativeBuild { cmake { path file('src/main/cpp/CMakeLists.txt'); version '3.22.1' } }
-    // Explicit path matches the CI cache; do not rely on runner-specific defaults.
+    // Explicit path matches the CI cache; create the key before invoking Gradle.
     signingConfigs {
         debug {
             storeFile file(System.getProperty('user.home') + '/.android/debug.keystore')

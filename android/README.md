@@ -1,53 +1,54 @@
-# RiMS2000R Android — Alpha 0.1.2
+# RiMS2000R Android — Alpha 0.1.2 Perf Test
 
-APK experimental ARM64 para Galaxy Tab A9. Núcleo original H8S/2350 + DSP56362; firmware separado aportado por el usuario. **La compilación no demuestra funcionamiento ni rendimiento en tiempo real en el dispositivo.**
+APK experimental ARM64 para Galaxy Tab A9. Motor original H8S/2350 + DSP56362; firmware separado. **Compilar no demuestra rendimiento en tiempo real en el dispositivo.**
 
-## Cambios de 0.1.2
+## Instalación sin borrar 0.1.1
 
-- Perfil nativo explícito `-O3` para todas las bibliotecas y ThinLTO para el núcleo H8S y el puente Android. DSP56300 y AsmJit se enlazan como bibliotecas independientes, sin ThinLTO, siguiendo el límite de optimización del núcleo en escritorio. JNI mantiene exportaciones explícitas. El workflow comprueba los comandos efectivos del compilador.
-- No se usa `-ffast-math`. No se cambian los relojes emulados, la frecuencia de 48 kHz, la polifonía, las interrupciones del DSP ni el bloque de render de 128 frames.
-- Prioridad de audio de mejor esfuerzo también para el hilo DSP opcional. La prioridad real del productor y el error de solicitud se muestran; no se requieren root ni prioridades RT privilegiadas.
-- Carga acumulada y ventana de dos segundos de audio emulado. Tiempo de CPU del productor separado del tiempo transcurrido: **no incluye el hilo DSP separado**, si se activa.
-- LCD leído del snapshot GPIO que usa el plugin original, en lugar del buffer obsoleto.
-- Contadores de frames sin dato DSP, frames con señal y pico digital previo al volumen para diagnosticar silencio.
-- El housekeeping no se envía rutinariamente a logcat; errores de la app siguen visibles.
-- Sigue disponible la zona segura y el botón fijo **Copiar diagnóstico** de 0.1.1.
+Esta APK se llama **RiMS2000R Perf Test**, con identificador `org.rinoize.rims2000r.perftest`. Se instala al lado de 0.1.1: no la reemplaza ni toca sus datos. Se usa este modo porque la clave anterior no estaba disponible en el runner. **No desinstalar la versión anterior.**
 
-**No hay todavía medición de la ganancia en la tablet.** Comparar primero con 512 muestras, DSP separado desactivado y el mismo programa. Después variar una sola opción por vez (1024 o hilo DSP).
+GitHub Actions → ejecución exitosa de **Android APK Alpha** → artefacto **RiMS2000R-Android-0.1.2-alpha-APK**. Contiene APK de prueba, fuente, SHA-256 y `SIGNING.txt`. La antigua acción **Android ARM64 native build** solo entrega una biblioteca `.so`.
 
-## Descarga e instalación
+1. Instalar `RiMS2000R-Android-0.1.2-alpha-perftest.apk` y abrir **RiMS2000R Perf Test**.
+2. Importar de nuevo el mismo ZIP propio de ROMs; esta app tiene almacenamiento separado. No incluye ROMs ni importa RAR directamente.
+3. Detener la app anterior y probar primero 512 muestras, la misma salida y programa, DSP separado desactivado. Solo una app debe estar generando audio.
+4. Reiniciar los medidores, tocar una nota y acordes, y copiar diagnóstico después de varios minutos.
+5. Como comparación separada, detener, activar **DSP en otro hilo** y repetir con el mismo programa y buffer. No cambiar varias opciones a la vez.
 
-GitHub Actions → ejecución exitosa de **Android APK Alpha** → artefacto **RiMS2000R-Android-0.1.2-alpha-APK**. Incluye APK, fuente del mismo commit, SHA-256 y `SIGNING.txt`, que compara el certificado con 0.1.1. **No desinstalar una versión con datos sin respaldo.** No asumir continuidad de firma solo porque el APK tenga el mismo identificador.
+ROMs esperadas: `flash.bin` de 1.048.576 bytes y `boot-362.bin` o `boot-362.ms2000.bin` de 768 bytes. LCD opcional: `hd44780_a00.bin`, 4.096 bytes. El estado activo después de cuatro segundos emulados no valida automáticamente el arranque.
 
-La acción anterior **Android ARM64 native build** entrega una biblioteca `.so`, no una app.
+## Cambios de rendimiento y diagnóstico
 
-## Prueba en la tablet
+- -O3/NDEBUG explícitos en todas las bibliotecas, ThinLTO solo para H8S/core y puente Android. DSP56300/AsmJit permanecen fuera de LTO como dependencias independientes. CI verifica los comandos reales.
+- Sin fast-math ni cambios de relojes emulados, polifonía, 48 kHz o bloques de 128 frames.
+- Prioridad de audio de mejor esfuerzo para el trabajador DSP opcional; diagnóstico de prioridad real del productor. Sin root ni prioridad RT privilegiada.
+- Carga acumulada y ventanas de dos segundos emulados; tiempo de CPU del productor separado del tiempo transcurrido. **Con DSP separado, CPU productor no incluye ese segundo hilo.**
+- LCD leído del snapshot GPIO que utiliza el plugin original, no del búfer obsoleto.
+- Contadores de frames sin dato DSP, frames con señal y pico digital antes del volumen.
+- Sin logcat síncrono rutinario durante housekeeping. Errores visibles en diagnóstico.
+- Se conserva la zona segura y el botón fijo de copiar diagnóstico.
 
-1. Instalar la APK conforme al resultado de `SIGNING.txt`.
-2. Importar un ZIP propio con `flash.bin` (1.048.576 bytes), `boot-362.bin` o `boot-362.ms2000.bin` (768 bytes). Opcional: `hd44780_a00.bin` (4.096 bytes). No se importa RAR directamente.
-3. Elegir cola 512, auriculares/altavoz de la tablet y DSP separado desactivado.
-4. Arrancar, comprobar LCD, tocar una nota y un acorde. El estado activo tras 4 segundos emulados no es validación automática del firmware.
-5. Conectar USB MIDI y elegir el puerto del teclado. Pasan Note On/Off, CC1, CC64 y pitch bend al firmware.
-6. Reiniciar medidores antes de una prueba repetible, tocar el mismo programa y copiar diagnóstico después de varios minutos. Observar media, pico y crecimiento de underruns, no solo CPU global.
+**No se ha medido aún la mejora en la Samsung.** Las comparaciones de audio locales x86_64 sirven para detectar regresiones en las secuencias probadas, no para estimar rendimiento ARM64.
 
-Cola de la app y buffer AAudio son distintos: ninguno representa por sí solo la latencia total. CPU de productor y tiempo de render también son métricas distintas.
+Cola de app y buffer AAudio son distintos y no son la latencia total. AAudio puede no registrar xruns mientras el productor no entrega muestras suficientes y el callback completa con ceros.
 
 ## Funciones y límites
 
-Importación ZIP privada acotada/validada, AAudio estéreo float, volumen con rampa, salida seleccionable, productor y FIFO sin bloqueo en el callback, MIDI USB, Program Change, notas táctiles/QWERTY, PANIC y pantalla encendida. Se detiene el motor al pasar a segundo plano.
+Importación ZIP privada acotada/validada, AAudio estéreo float, volumen con rampa, salida seleccionable, productor/FIFO, entrada USB MIDI, Program Change, notas táctiles/QWERTY, PANIC y pantalla encendida. Al pasar a segundo plano se detiene el motor.
 
-Pendientes: panel completo, biblioteca `.syx`, MIDI OUT, audio de entrada/vocoder, funcionamiento en segundo plano y validación física de sonido/latencia/estabilidad. La selección de canal de prueba no reprograma el canal Global del firmware.
+Pendientes: panel completo, biblioteca SysEx, MIDI OUT, audio de entrada/vocoder, segundo plano y validación física de sonido, latencia y estabilidad. El canal de prueba no reprograma el canal Global del firmware.
 
-## Compilación y pruebas
+## Compilar y validar
 
-JDK 17, Gradle 8.9, SDK 35, Build Tools 35.0.0, NDK r27c `27.2.12479018`, CMake 3.22.1:
+JDK 17, Gradle 8.9, SDK 35, Build Tools 35.0.0, NDK r27c `27.2.12479018`, CMake 3.22.1. Crear una clave de desarrollo local en `~/.android/debug.keystore` antes de compilar; CI la crea si falta y la conserva en caché, nunca la publica.
 
 ```sh
-gradle -p android :app:assembleDebug
+gradle -p android :app:assembleDebug -PrimsPerfSideBySide=true
 ```
 
-CI prueba FIFO concurrente, framing MIDI, importación ZIP y métricas; verifica `-O3`/ThinLTO, firma y biblioteca ARM64. No ejecuta ni publica ROMs. La clave de desarrollo se conserva en caché; no es una clave de producción y la compatibilidad de actualización se comprueba con certificados.
+Sin la propiedad `rimsPerfSideBySide`, se usa el identificador original; no utilizar esa variante como actualización sin comprobar certificados.
+
+CI prueba FIFO concurrente, MIDI, importación ZIP y métricas; verifica optimizaciones, firma, identificador paralelo y biblioteca ARM64. No ejecuta ROMs. La caché de firma es de desarrollo, no una clave de producción.
 
 ## Licencia
 
-GPL-3.0. Conservar atribuciones de Tamás Bársony/Tuth y The Usual Suspects/DSP56300. El artefacto incluye fuente correspondiente. **No incluir ROMs en GitHub, CI ni APK.** Korg/MS2000 son marcas de Korg; esta adaptación no está afiliada ni avalada por Korg.
+GPL-3.0, con atribuciones a Tamás Bársony/Tuth y The Usual Suspects/DSP56300. Se incluye código fuente correspondiente. **No hay ROMs en GitHub, CI ni APK.** Korg/MS2000 son marcas de Korg; esta adaptación no está afiliada ni avalada por Korg.

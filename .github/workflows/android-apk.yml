@@ -29,7 +29,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.android/debug.keystore
-          key: rims2000r-development-signing-v1
+          key: rims2000r-development-signing-v2
+      - name: Ensure explicit development key exists
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair -noprompt -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey -keypass android -dname 'CN=RiMS2000R Development,O=RiNoize,C=AR' -keyalg RSA -keysize 2048 -validity 10000
+          fi
       - name: Install pinned Android SDK components
         shell: bash
         run: |
@@ -53,7 +60,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          gradle -p android :app:assembleDebug --no-daemon --stacktrace 2>&1 | tee "$RUNNER_TEMP/rims-apk-build.log"
+          gradle -p android :app:assembleDebug -PrimsPerfSideBySide=true --no-daemon --stacktrace 2>&1 | tee "$RUNNER_TEMP/rims-apk-build.log"
       - name: Preserve native build failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
@@ -79,7 +86,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/android
-          cp android/app/build/outputs/apk/debug/app-debug.apk dist/android/RiMS2000R-Android-0.1.2-alpha.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/android/RiMS2000R-Android-0.1.2-alpha-perftest.apk
           SIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
           "$SIGNER" verify --verbose --print-certs dist/android/*.apk
           OLD="$(find previous-build -name '*.apk' -print -quit)"
@@ -87,14 +94,17 @@ jobs:
           PREVIOUS="$($SIGNER verify --print-certs "$OLD" | grep 'Signer #1 certificate SHA-256 digest:')"
           CURRENT="$($SIGNER verify --print-certs dist/android/*.apk | grep 'Signer #1 certificate SHA-256 digest:')"
           {
+            echo 'INSTALLATION_MODE: side-by-side. Application ID org.rinoize.rims2000r.perftest.'
+            echo 'Keep 0.1.1 installed. This test has separate private data and needs its own ROM import.'
             echo "Previous 0.1.1: $PREVIOUS"
             echo "Current 0.1.2: $CURRENT"
             if [ "$PREVIOUS" = "$CURRENT" ]; then
-              echo 'SAME_CERTIFICATE: update without uninstalling.'
+              echo 'SAME_CERTIFICATE: certificate matches, but the test uses a separate application ID.'
             else
-              echo 'DIFFERENT_CERTIFICATE: NOT a direct update. Do not uninstall unsaved data.'
+              echo 'DIFFERENT_CERTIFICATE: side-by-side test; do not uninstall the original app.'
             fi
           } | tee dist/android/SIGNING.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/android/*.apk | grep "package: name='org.rinoize.rims2000r.perftest'"
           unzip -l dist/android/*.apk | grep 'lib/arm64-v8a/librims2000r_native.so'
           if unzip -l dist/android/*.apk | grep -Ei 'flash\.bin|boot-362|hd44780_a00'; then echo 'ROM included unexpectedly'; exit 1; fi
           git archive --format=zip --output=dist/android/RiMS2000R-Android-0.1.2-source.zip HEAD
