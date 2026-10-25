@@ -11,3 +11,5 @@ target_sources(rims2000r_native PRIVATE "${CMAKE_CURRENT_LIST_DIR}/rims_android.
 target_include_directories(rims2000r_native PRIVATE "${RIMS_ROOT}/source" "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(rims2000r_native PRIVATE aaudio android log)
 target_link_options(rims2000r_native PRIVATE "-Wl,-z,max-page-size=16384")
+
+include("${RIMS_ROOT}/android/native/optimization.cmake")

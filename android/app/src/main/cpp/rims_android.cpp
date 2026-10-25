@@ -17,6 +17,10 @@
 #include <string>
 #include <thread>
 #include <sys/resource.h>
+#include <time.h>
+#include "render_window.h"
+#include "../../../../native/audio_thread_policy.h"
+#include "core/lcd_gui.h"
 #include <unistd.h>
 #include "audio_fifo.h"
 #include "core/ms2000_runner.h"
@@ -26,6 +30,11 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr uint32_t kBlock = 128;
 constexpr uint64_t kWarmup = 48000 * 4;
+static uint64_t threadCpuNs() {
+    timespec value{};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) != 0) return 0;
+    return uint64_t(value.tv_sec) * 1000000000ull + uint64_t(value.tv_nsec);
+}
 static_assert(std::atomic<float>::is_always_lock_free, "audio gain must be lock free");
 
 class Engine {
@@ -34,8 +43,12 @@ class Engine {
     std::thread producer_;
     AAudioStream* stream_ = nullptr;
     AudioFifo<> fifo_;
-    std::atomic<bool> run_{false}, panic_{false};
-    std::atomic<int> state_{0}, error_{0};
+    std::atomic<bool> run_{false}, panic_{false}, resetRequested_{false};
+    std::atomic<int> state_{0}, error_{0}, workerNice_{0}, priorityError_{0};
+    std::atomic<bool> separateDsp_{false};
+    std::atomic<uint64_t> cpuNs_{0}, noDspFrames_{0}, signalFrames_{0};
+    std::atomic<float> recentWall_{0}, recentCpu_{0}, recentPeak_{0}, signalPeak_{0};
+    std::atomic<bool> haveWindow_{false};
     std::atomic<float> gain_{0.5f};
     float callbackGain_ = 0.0f;
     std::array<uint8_t, 65536> midi_{};
@@ -85,10 +98,12 @@ class Engine {
         }
     }
     void produce() noexcept {
-        // Best effort: no root or privileged scheduling is required.
-        (void)setpriority(PRIO_PROCESS, 0, -16);
+        const auto policy = rims::audioThreadPolicy("RiMS2000R-Audio");
+        workerNice_.store(policy.niceValue); priorityError_.store(policy.error);
+        RenderWindow window;
         std::array<float, kBlock> left{}, right{};
         std::array<uint8_t, 2048> messages{};
+        std::array<uint8_t, kBlock> fromDsp{};
         uint64_t frames = 0;
         try {
             while (run_.load(std::memory_order_acquire)) {
@@ -99,7 +114,15 @@ class Engine {
                 if (fifo_.size() >= target_.load()) {
                     std::this_thread::sleep_for(std::chrono::microseconds(250)); continue;
                 }
+                // Reset both parts of each ratio at a producer block boundary.
+                if (resetRequested_.exchange(false)) {
+                    workNs_.store(0); workFrames_.store(0); peakNs_.store(0); cpuNs_.store(0);
+                    recentWall_.store(0); recentCpu_.store(0); recentPeak_.store(0); haveWindow_.store(false);
+                    noDspFrames_.store(0); signalFrames_.store(0); signalPeak_.store(0);
+                    window.clear();
+                }
                 const auto before = Clock::now();
+                const auto cpuBefore = threadCpuNs();
                 if (panic_.exchange(false)) sendPanic();
                 uint32_t count = 0;
                 {
@@ -109,11 +132,29 @@ class Engine {
                     midiRead_ += count;
                 }
                 if (count) runner_->sendMIDIData(messages.data(), count);
-                runner_->render(left.data(), right.data(), kBlock);
+                runner_->render(left.data(), right.data(), kBlock, nullptr, 0, fromDsp.data());
+                const auto cpuAfter = threadCpuNs();
+                const uint64_t cpu = cpuBefore && cpuAfter >= cpuBefore ? cpuAfter - cpuBefore : 0;
                 const auto ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - before).count());
                 frames += kBlock; rendered_.store(frames, std::memory_order_relaxed);
                 if (frames >= kWarmup) {
-                    if (state_.load() == 1) { state_.store(2); text("Motor activo. Verificar el sonido en la tablet."); }
+                    if (state_.load() == 1) { state_.store(2); text("Emulacion activa; verificar LCD y sonido (no es una prueba automatica de arranque)."); }
+                    cpuNs_.fetch_add(cpu, std::memory_order_relaxed);
+                    if (window.add(ns, cpu, kBlock)) {
+                        recentWall_.store(float(RenderWindow::percent(window.wallNs, window.frames)));
+                        recentCpu_.store(float(RenderWindow::percent(window.cpuNs, window.frames)));
+                        recentPeak_.store(float(RenderWindow::percent(window.maxNs, kBlock)));
+                        haveWindow_.store(true); window.clear();
+                    }
+                    uint32_t absent = 0, signal = 0; float peak = 0;
+                    for (uint32_t i = 0; i < kBlock; ++i) {
+                        absent += !fromDsp[i];
+                        const float level = std::max(std::abs(left[i]), std::abs(right[i]));
+                        if (std::isfinite(level)) { peak = std::max(peak, level); signal += level > 0; }
+                    }
+                    noDspFrames_.fetch_add(absent, std::memory_order_relaxed);
+                    signalFrames_.fetch_add(signal, std::memory_order_relaxed);
+                    signalPeak_.store(std::max(signalPeak_.load(), peak));
                     workNs_.fetch_add(ns, std::memory_order_relaxed);
                     workFrames_.fetch_add(kBlock, std::memory_order_relaxed);
                     uint64_t p = peakNs_.load();
@@ -121,7 +162,11 @@ class Engine {
                 }
                 if (!fifo_.push(left.data(), right.data(), kBlock)) throw std::runtime_error("FIFO de audio llena");
                 if ((frames / kBlock) % 94 == 0) {
-                    std::string display = runner_->getLCDContent();
+                    // Read the GPIO-driven LCD snapshot used by the upstream plugin.
+                    // getLCDContent() reads a legacy buffer not updated on this path.
+                    const auto snapshot = runner_->getLcdGuiSnapshot();
+                    std::string display(snapshot.line0, 16);
+                    display += '\n'; display.append(snapshot.line1, 16);
                     for (char& c : display) if ((static_cast<unsigned char>(c) < 32 && c != '\n') || static_cast<unsigned char>(c) > 126) c = ' ';
                     { std::lock_guard<std::mutex> lock(textMutex_); lcd_ = display; }
                     xruns_.store(AAudioStream_getXRunCount(stream_));
@@ -159,9 +204,11 @@ public:
             MS2000::Ms2kConfig cfg;
             cfg.romPath = "flash.bin"; cfg.sampleRate = 48000; cfg.quietBoot = true;
             cfg.audio.enabled = false; cfg.useMmcss = false; cfg.enableMidiSmokeTest = false;
-            cfg.dspThread = dspThread; cfg.flashStateSave = true; cfg.flashStateLoad = true;
+            cfg.dspThread = dspThread; separateDsp_.store(dspThread); cfg.flashStateSave = true; cfg.flashStateLoad = true;
             MS2000::Ms2kGuiHooks hooks;
-            hooks.logFn = [](const char* s) { __android_log_write(ANDROID_LOG_DEBUG, "RiMS2000R", s); };
+            // Routine panel housekeeping must not synchronously send logs to logcat.
+            // Exceptions/AAudio errors remain visible in the diagnostic text.
+            hooks.logFn = [](const char*) {};
             runner_ = std::make_unique<MS2000::Ms2kRunner>(cfg, hooks);
             if (!runner_->init() || !runner_->startManual()) throw std::runtime_error("El emulador rechazo el arranque");
 
@@ -216,22 +263,30 @@ public:
         midiWrite_ += count; midiBytes_.fetch_add(count);
     }
     void resetStats() {
-        workNs_.store(0); workFrames_.store(0); peakNs_.store(0);
+        resetRequested_.store(true);
         underruns_.store(0); missing_.store(0); xruns_.store(0);
     }
     std::string stats() {
         const double frames = double(workFrames_.load());
         const double mean = frames > 0 ? double(workNs_.load()) * 48000.0 / frames / 1e7 : 0.0;
         const double peak = double(peakNs_.load()) * 48000.0 / kBlock / 1e7;
-        char b[700];
+        char b[1500];
         std::snprintf(b, sizeof b,
             "48 kHz / ARM64 | Cola %u + AAudio %d muestras | burst %d | salida ID %d\n"
-            "Carga render: %.1f%% media / %.1f%% pico (100%% = plazo agotado; no CPU total)\n"
+            "Perfil nativo: O3 + ThinLTO %s | bloque %u | DSP separado: %s | nice productor %d (error %d)\n"
+            "Carga render acumulada: %.1f%% media / %.1f%% pico (100%% = plazo agotado; no CPU total)\n"
+            "Ventana 2 s emulados: %.1f%% render / %.1f%% CPU productor / %.1f%% pico %s\n"
+            "CPU productor acumulada: %.1f%% (si DSP separado: no incluye ese hilo)\n"
             "Underruns de cola: %llu | muestras faltantes: %llu | AAudio xruns: %d\n"
-            "Tiempo emulado: %.1f s | MIDI: %llu bytes | descartados: %llu\n",
-            target_.load(), hardwareFrames_.load(), burst_.load(), device_.load(), mean, peak,
+            "Tiempo emulado: %.1f s | MIDI: %llu bytes | descartados: %llu\n"
+            "DSP sin frame: %llu | frames con senal: %llu | pico digital pre-volumen: %.6f\n",
+            target_.load(), hardwareFrames_.load(), burst_.load(), device_.load(),
+            RIMS_ANDROID_THINLTO ? "ON" : "OFF", kBlock, separateDsp_.load() ? "SI" : "NO", workerNice_.load(), priorityError_.load(), mean, peak,
+            recentWall_.load(), recentCpu_.load(), recentPeak_.load(), haveWindow_.load() ? "" : "(aun sin ventana completa)",
+            RenderWindow::percent(cpuNs_.load(), uint64_t(frames)),
             (unsigned long long)underruns_.load(), (unsigned long long)missing_.load(), xruns_.load(),
-            double(rendered_.load()) / 48000.0, (unsigned long long)midiBytes_.load(), (unsigned long long)dropped_.load());
+            double(rendered_.load()) / 48000.0, (unsigned long long)midiBytes_.load(), (unsigned long long)dropped_.load(),
+            (unsigned long long)noDspFrames_.load(), (unsigned long long)signalFrames_.load(), signalPeak_.load());
         std::lock_guard<std::mutex> lock(textMutex_);
         return message_ + "\n\nLCD: " + lcd_ + "\n\n" + b;
     }

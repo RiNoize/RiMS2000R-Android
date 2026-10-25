@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: rims-apk-${{ github.ref }}
   cancel-in-progress: true
@@ -44,21 +45,49 @@ jobs:
           mkdir -p /tmp/rims-java-tests
           javac -d /tmp/rims-java-tests android/app/src/main/java/org/rinoize/rims2000r/FirmwareImporter.java android/app/src/main/java/org/rinoize/rims2000r/MidiFramer.java android/tests/CoreTests.java
           java -cp /tmp/rims-java-tests org.rinoize.rims2000r.CoreTests
+      - name: Test render metrics
+        run: |
+          c++ -std=c++17 -O2 android/tests/render_window_test.cpp -o /tmp/rims-window-test
+          /tmp/rims-window-test
       - name: Build installable ARM64 APK
         run: gradle -p android :app:assembleDebug --no-daemon --stacktrace
+      - name: Verify effective native optimisation flags
+        run: python3 android/tests/verify_native_flags.py
+      - name: Download previous APK for certificate comparison
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: RiNoize/RiMS2000R-Android
+          run-id: '40135969832'
+          artifact-ids: '12576933949'
+          path: previous-build
       - name: Verify package and preserve corresponding source
         shell: bash
         run: |
           mkdir -p dist/android
-          cp android/app/build/outputs/apk/debug/app-debug.apk dist/android/RiMS2000R-Android-0.1.1-alpha.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose dist/android/*.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/android/RiMS2000R-Android-0.1.2-alpha.apk
+          SIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$SIGNER" verify --verbose --print-certs dist/android/*.apk
+          OLD="$(find previous-build -name '*.apk' -print -quit)"
+          test -n "$OLD"
+          PREVIOUS="$($SIGNER verify --print-certs "$OLD" | grep 'Signer #1 certificate SHA-256 digest:')"
+          CURRENT="$($SIGNER verify --print-certs dist/android/*.apk | grep 'Signer #1 certificate SHA-256 digest:')"
+          {
+            echo "Previous 0.1.1: $PREVIOUS"
+            echo "Current 0.1.2: $CURRENT"
+            if [ "$PREVIOUS" = "$CURRENT" ]; then
+              echo 'SAME_CERTIFICATE: update without uninstalling.'
+            else
+              echo 'DIFFERENT_CERTIFICATE: NOT a direct update. Do not uninstall unsaved data.'
+            fi
+          } | tee dist/android/SIGNING.txt
           unzip -l dist/android/*.apk | grep 'lib/arm64-v8a/librims2000r_native.so'
           if unzip -l dist/android/*.apk | grep -Ei 'flash\.bin|boot-362|hd44780_a00'; then echo 'ROM included unexpectedly'; exit 1; fi
-          git archive --format=zip --output=dist/android/RiMS2000R-Android-0.1.1-source.zip HEAD
+          git archive --format=zip --output=dist/android/RiMS2000R-Android-0.1.2-source.zip HEAD
           (cd dist/android && sha256sum *.apk *.zip > SHA256SUMS.txt)
       - uses: actions/upload-artifact@v4
         with:
-          name: RiMS2000R-Android-0.1.1-alpha-APK
+          name: RiMS2000R-Android-0.1.2-alpha-APK
           path: dist/android/*
           if-no-files-found: error
           retention-days: 90

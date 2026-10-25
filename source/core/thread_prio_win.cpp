@@ -30,6 +30,13 @@ void ms2kAudioWorkerThread()
 #include <pthread.h>
 #include <pthread/qos.h>
 namespace MS2000 { void ms2kAudioWorkerThread() { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0); } }
+#elif defined(__ANDROID__)
+// The optional DSP worker is created by the control thread, not the audio producer,
+// and previously inherited ordinary priority. Best effort; no privileged RT policy.
+#include "../../android/native/audio_thread_policy.h"
+namespace MS2000 {
+void ms2kAudioWorkerThread() { (void)rims::audioThreadPolicy("RiMS2000R-DSP"); }
+}
 #else
 namespace MS2000 { void ms2kAudioWorkerThread() {} }
 #endif
