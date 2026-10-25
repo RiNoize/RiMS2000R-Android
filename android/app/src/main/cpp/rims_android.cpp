@@ -1,0 +1,323 @@
+// RiMS2000R Android Alpha - original firmware engine, JNI, AAudio and USB-MIDI ingress.
+// GPL-3.0; no proprietary ROM data in this file or the APK.
+#include <jni.h>
+#include <aaudio/AAudio.h>
+#include <android/log.h>
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <sys/resource.h>
+#include <time.h>
+#include "render_window.h"
+#include "../../../../native/audio_thread_policy.h"
+#include "core/lcd_gui.h"
+#include <unistd.h>
+#include "audio_fifo.h"
+#include "core/ms2000_runner.h"
+#include "core/rom_paths.h"
+
+namespace {
+using Clock = std::chrono::steady_clock;
+constexpr uint32_t kBlock = 128;
+constexpr uint64_t kWarmup = 48000 * 4;
+static uint64_t threadCpuNs() {
+    timespec value{};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) != 0) return 0;
+    return uint64_t(value.tv_sec) * 1000000000ull + uint64_t(value.tv_nsec);
+}
+static_assert(std::atomic<float>::is_always_lock_free, "audio gain must be lock free");
+
+class Engine {
+    std::mutex lifecycle_, textMutex_, midiMutex_;
+    std::unique_ptr<MS2000::Ms2kRunner> runner_;
+    std::thread producer_;
+    AAudioStream* stream_ = nullptr;
+    AudioFifo<> fifo_;
+    std::atomic<bool> run_{false}, panic_{false}, resetRequested_{false};
+    std::atomic<int> state_{0}, error_{0}, workerNice_{0}, priorityError_{0};
+    std::atomic<bool> separateDsp_{false};
+    std::atomic<uint64_t> cpuNs_{0}, noDspFrames_{0}, signalFrames_{0};
+    std::atomic<float> recentWall_{0}, recentCpu_{0}, recentPeak_{0}, signalPeak_{0};
+    std::atomic<bool> haveWindow_{false};
+    std::atomic<float> gain_{0.5f};
+    float callbackGain_ = 0.0f;
+    std::array<uint8_t, 65536> midi_{};
+    uint32_t midiRead_ = 0, midiWrite_ = 0;
+    std::atomic<uint64_t> midiBytes_{0}, dropped_{0};
+    std::atomic<uint64_t> workNs_{0}, workFrames_{0}, peakNs_{0}, underruns_{0}, missing_{0}, rendered_{0};
+    std::atomic<int> xruns_{0}, hardwareFrames_{0}, burst_{0}, device_{0};
+    std::atomic<uint32_t> target_{512};
+    std::string message_ = "Motor detenido", lcd_;
+
+    void text(const std::string& message) {
+        std::lock_guard<std::mutex> lock(textMutex_); message_ = message;
+    }
+    static aaudio_data_callback_result_t audioCallback(AAudioStream*, void* self, void* data, int32_t n) {
+        return static_cast<Engine*>(self)->audio(static_cast<float*>(data), n);
+    }
+    static void errorCallback(AAudioStream*, void* self, aaudio_result_t code) {
+        // AAudio must not be closed, joined or reconfigured on this callback thread.
+        static_cast<Engine*>(self)->error_.store(code, std::memory_order_release);
+    }
+    aaudio_data_callback_result_t audio(float* data, int32_t frames) {
+        if (frames <= 0) return AAUDIO_CALLBACK_RESULT_CONTINUE;
+        const uint32_t n = run_.load(std::memory_order_relaxed) ? fifo_.pop(data, uint32_t(frames)) : 0;
+        std::fill(data + n * 2, data + uint32_t(frames) * 2, 0.0f);
+        if (n < uint32_t(frames) && state_.load(std::memory_order_relaxed) == 2) {
+            underruns_.fetch_add(1, std::memory_order_relaxed);
+            missing_.fetch_add(uint32_t(frames) - n, std::memory_order_relaxed);
+        }
+        const float wanted = gain_.load(std::memory_order_relaxed);
+        const float step = (wanted - callbackGain_) / float(frames);
+        for (int32_t i = 0; i < frames; ++i) {
+            callbackGain_ += step;
+            for (int ch = 0; ch < 2; ++ch) {
+                const float s = data[i * 2 + ch] * callbackGain_;
+                data[i * 2 + ch] = std::isfinite(s) ? std::clamp(s, -1.0f, 1.0f) : 0.0f;
+            }
+        }
+        return AAUDIO_CALLBACK_RESULT_CONTINUE;
+    }
+    void sendPanic() {
+        // End an incomplete SysEx, release sustain and silence every channel.
+        const uint8_t end = 0xf7; runner_->sendMIDIData(&end, 1);
+        for (uint8_t ch = 0; ch < 16; ++ch) {
+            for (uint8_t cc : {uint8_t(64), uint8_t(123), uint8_t(120)}) {
+                const uint8_t b[] = {uint8_t(0xb0 | ch), cc, 0}; runner_->sendMIDIData(b, 3);
+            }
+        }
+    }
+    void produce() noexcept {
+        const auto policy = rims::audioThreadPolicy("RiMS2000R-Audio");
+        workerNice_.store(policy.niceValue); priorityError_.store(policy.error);
+        RenderWindow window;
+        std::array<float, kBlock> left{}, right{};
+        std::array<uint8_t, 2048> messages{};
+        std::array<uint8_t, kBlock> fromDsp{};
+        uint64_t frames = 0;
+        try {
+            while (run_.load(std::memory_order_acquire)) {
+                if (error_.load()) {
+                    text(std::string("Error de salida: ") + AAudio_convertResultToText(error_.load()) + ". Detener y volver a arrancar.");
+                    state_.store(3); break;
+                }
+                if (fifo_.size() >= target_.load()) {
+                    std::this_thread::sleep_for(std::chrono::microseconds(250)); continue;
+                }
+                // Reset both parts of each ratio at a producer block boundary.
+                if (resetRequested_.exchange(false)) {
+                    workNs_.store(0); workFrames_.store(0); peakNs_.store(0); cpuNs_.store(0);
+                    recentWall_.store(0); recentCpu_.store(0); recentPeak_.store(0); haveWindow_.store(false);
+                    noDspFrames_.store(0); signalFrames_.store(0); signalPeak_.store(0);
+                    window.clear();
+                }
+                const auto before = Clock::now();
+                const auto cpuBefore = threadCpuNs();
+                if (panic_.exchange(false)) sendPanic();
+                uint32_t count = 0;
+                {
+                    std::lock_guard<std::mutex> lock(midiMutex_);
+                    count = std::min<uint32_t>(midiWrite_ - midiRead_, messages.size());
+                    for (uint32_t i = 0; i < count; ++i) messages[i] = midi_[(midiRead_ + i) & 65535];
+                    midiRead_ += count;
+                }
+                if (count) runner_->sendMIDIData(messages.data(), count);
+                runner_->render(left.data(), right.data(), kBlock, nullptr, 0, fromDsp.data());
+                const auto cpuAfter = threadCpuNs();
+                const uint64_t cpu = cpuBefore && cpuAfter >= cpuBefore ? cpuAfter - cpuBefore : 0;
+                const auto ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - before).count());
+                frames += kBlock; rendered_.store(frames, std::memory_order_relaxed);
+                if (frames >= kWarmup) {
+                    if (state_.load() == 1) { state_.store(2); text("Emulacion activa; verificar LCD y sonido (no es una prueba automatica de arranque)."); }
+                    cpuNs_.fetch_add(cpu, std::memory_order_relaxed);
+                    if (window.add(ns, cpu, kBlock)) {
+                        recentWall_.store(float(RenderWindow::percent(window.wallNs, window.frames)));
+                        recentCpu_.store(float(RenderWindow::percent(window.cpuNs, window.frames)));
+                        recentPeak_.store(float(RenderWindow::percent(window.maxNs, kBlock)));
+                        haveWindow_.store(true); window.clear();
+                    }
+                    uint32_t absent = 0, signal = 0; float peak = 0;
+                    for (uint32_t i = 0; i < kBlock; ++i) {
+                        absent += !fromDsp[i];
+                        const float level = std::max(std::abs(left[i]), std::abs(right[i]));
+                        if (std::isfinite(level)) { peak = std::max(peak, level); signal += level > 0; }
+                    }
+                    noDspFrames_.fetch_add(absent, std::memory_order_relaxed);
+                    signalFrames_.fetch_add(signal, std::memory_order_relaxed);
+                    signalPeak_.store(std::max(signalPeak_.load(), peak));
+                    workNs_.fetch_add(ns, std::memory_order_relaxed);
+                    workFrames_.fetch_add(kBlock, std::memory_order_relaxed);
+                    uint64_t p = peakNs_.load();
+                    while (p < ns && !peakNs_.compare_exchange_weak(p, ns)) {}
+                }
+                if (!fifo_.push(left.data(), right.data(), kBlock)) throw std::runtime_error("FIFO de audio llena");
+                if ((frames / kBlock) % 94 == 0) {
+                    // Read the GPIO-driven LCD snapshot used by the upstream plugin.
+                    // getLCDContent() reads a legacy buffer not updated on this path.
+                    const auto snapshot = runner_->getLcdGuiSnapshot();
+                    std::string display(snapshot.line0, 16);
+                    display += '\n'; display.append(snapshot.line1, 16);
+                    for (char& c : display) if ((static_cast<unsigned char>(c) < 32 && c != '\n') || static_cast<unsigned char>(c) > 126) c = ' ';
+                    { std::lock_guard<std::mutex> lock(textMutex_); lcd_ = display; }
+                    xruns_.store(AAudioStream_getXRunCount(stream_));
+                }
+            }
+        } catch (const std::exception& e) {
+            text(std::string("Error del motor: ") + e.what()); state_.store(3);
+        } catch (...) { text("Error nativo no identificado"); state_.store(3); }
+        run_.store(false, std::memory_order_release);
+    }
+    void stopLocked() {
+        run_.store(false, std::memory_order_release);
+        if (producer_.joinable()) producer_.join();
+        if (stream_) {
+            AAudioStream_requestStop(stream_);
+            AAudioStream_close(stream_); stream_ = nullptr;
+        }
+        if (runner_) { runner_->stop(); runner_.reset(); }
+        fifo_.reset();
+        { std::lock_guard<std::mutex> lock(midiMutex_); midiRead_ = midiWrite_ = 0; }
+        state_.store(0); text("Motor detenido");
+    }
+public:
+    std::string start(const std::string& directory, int queueFrames, int deviceId, bool dspThread) {
+        std::lock_guard<std::mutex> lock(lifecycle_);
+        stopLocked();
+        try {
+            if (queueFrames != 256 && queueFrames != 512 && queueFrames != 1024) throw std::runtime_error("Buffer invalido");
+            if (!ms2k::hasRoms(directory)) throw std::runtime_error("Importar primero el ZIP con flash.bin y boot-362.bin");
+            if (std::filesystem::file_size(std::filesystem::path(directory) / "flash.bin") != 1048576) throw std::runtime_error("flash.bin debe medir 1048576 bytes");
+            const auto boot = std::filesystem::path(directory) / ms2k::findBootRom(directory);
+            if (std::filesystem::file_size(boot) != 768) throw std::runtime_error("ROM del DSP: se esperan 768 bytes");
+            if (chdir(directory.c_str()) != 0) throw std::runtime_error("No se puede abrir la carpeta privada de ROMs");
+            setenv("MS2K_MODEL", "R", 1);
+            MS2000::Ms2kConfig cfg;
+            cfg.romPath = "flash.bin"; cfg.sampleRate = 48000; cfg.quietBoot = true;
+            cfg.audio.enabled = false; cfg.useMmcss = false; cfg.enableMidiSmokeTest = false;
+            cfg.dspThread = dspThread; separateDsp_.store(dspThread); cfg.flashStateSave = true; cfg.flashStateLoad = true;
+            MS2000::Ms2kGuiHooks hooks;
+            // Routine panel housekeeping must not synchronously send logs to logcat.
+            // Exceptions/AAudio errors remain visible in the diagnostic text.
+            hooks.logFn = [](const char*) {};
+            runner_ = std::make_unique<MS2000::Ms2kRunner>(cfg, hooks);
+            if (!runner_->init() || !runner_->startManual()) throw std::runtime_error("El emulador rechazo el arranque");
+
+            AAudioStreamBuilder* builder = nullptr;
+            auto result = AAudio_createStreamBuilder(&builder);
+            if (result != AAUDIO_OK) throw std::runtime_error(AAudio_convertResultToText(result));
+            AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_OUTPUT);
+            AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_FLOAT);
+            AAudioStreamBuilder_setSampleRate(builder, 48000);
+            AAudioStreamBuilder_setChannelCount(builder, 2);
+            AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+            AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
+            if (deviceId > 0) AAudioStreamBuilder_setDeviceId(builder, deviceId);
+            AAudioStreamBuilder_setBufferCapacityInFrames(builder, std::max(2048, queueFrames * 4));
+            AAudioStreamBuilder_setDataCallback(builder, audioCallback, this);
+            AAudioStreamBuilder_setErrorCallback(builder, errorCallback, this);
+            result = AAudioStreamBuilder_openStream(builder, &stream_);
+            AAudioStreamBuilder_delete(builder);
+            if (result != AAUDIO_OK) throw std::runtime_error(AAudio_convertResultToText(result));
+            if (AAudioStream_getSampleRate(stream_) != 48000 || AAudioStream_getChannelCount(stream_) != 2 || AAudioStream_getFormat(stream_) != AAUDIO_FORMAT_PCM_FLOAT)
+                throw std::runtime_error("La salida no acepto 48 kHz estereo float; elegir otra salida");
+            burst_.store(AAudioStream_getFramesPerBurst(stream_));
+            const int actual = AAudioStream_setBufferSizeInFrames(stream_, std::max(queueFrames, burst_.load() * 2));
+            if (actual < 0) throw std::runtime_error(AAudio_convertResultToText(actual));
+            hardwareFrames_.store(actual); device_.store(AAudioStream_getDeviceId(stream_));
+            target_.store(uint32_t(std::max(queueFrames, burst_.load() * 2)));
+            if (target_.load() > 8192) throw std::runtime_error("La salida requiere un buffer demasiado grande");
+            callbackGain_ = 0; error_.store(0); panic_.store(false);
+            midiBytes_.store(0); dropped_.store(0); rendered_.store(0); resetStats();
+            { std::lock_guard<std::mutex> textLock(textMutex_); lcd_.clear(); }
+            state_.store(1); text("Arrancando el firmware... las notas se habilitan despues de 4 s emulados.");
+            run_.store(true, std::memory_order_release);
+            producer_ = std::thread(&Engine::produce, this);
+            result = AAudioStream_requestStart(stream_);
+            if (result != AAUDIO_OK) throw std::runtime_error(AAudio_convertResultToText(result));
+            return {};
+        } catch (const std::exception& e) {
+            const std::string reason = e.what(); stopLocked(); text(reason); state_.store(3); return reason;
+        } catch (...) { stopLocked(); text("Error iniciando el motor"); state_.store(3); return "Error iniciando el motor"; }
+    }
+    void stop() { std::lock_guard<std::mutex> lock(lifecycle_); stopLocked(); }
+    int state() const { return state_.load(std::memory_order_acquire); }
+    void setVolume(float v) { if (std::isfinite(v)) gain_.store(std::clamp(v, 0.0f, 1.0f)); }
+    void panic() { panic_.store(true); }
+    void addMidi(const uint8_t* bytes, uint32_t count) {
+        if (state() != 2 || count == 0) return;
+        std::lock_guard<std::mutex> lock(midiMutex_);
+        if (count > 65536 - (midiWrite_ - midiRead_)) {
+            dropped_.fetch_add(count); midiRead_ = midiWrite_; panic_.store(true); return;
+        }
+        for (uint32_t i = 0; i < count; ++i) midi_[(midiWrite_ + i) & 65535] = bytes[i];
+        midiWrite_ += count; midiBytes_.fetch_add(count);
+    }
+    void resetStats() {
+        resetRequested_.store(true);
+        underruns_.store(0); missing_.store(0); xruns_.store(0);
+    }
+    std::string stats() {
+        const double frames = double(workFrames_.load());
+        const double mean = frames > 0 ? double(workNs_.load()) * 48000.0 / frames / 1e7 : 0.0;
+        const double peak = double(peakNs_.load()) * 48000.0 / kBlock / 1e7;
+        char b[1500];
+        std::snprintf(b, sizeof b,
+            "48 kHz / ARM64 | Cola %u + AAudio %d muestras | burst %d | salida ID %d\n"
+            "Perfil nativo: O3 + ThinLTO %s | bloque %u | DSP separado: %s | nice productor %d (error %d)\n"
+            "Carga render acumulada: %.1f%% media / %.1f%% pico (100%% = plazo agotado; no CPU total)\n"
+            "Ventana 2 s emulados: %.1f%% render / %.1f%% CPU productor / %.1f%% pico %s\n"
+            "CPU productor acumulada: %.1f%% (si DSP separado: no incluye ese hilo)\n"
+            "Underruns de cola: %llu | muestras faltantes: %llu | AAudio xruns: %d\n"
+            "Tiempo emulado: %.1f s | MIDI: %llu bytes | descartados: %llu\n"
+            "DSP sin frame: %llu | frames con senal: %llu | pico digital pre-volumen: %.6f\n",
+            target_.load(), hardwareFrames_.load(), burst_.load(), device_.load(),
+            RIMS_ANDROID_THINLTO ? "ON" : "OFF", kBlock, separateDsp_.load() ? "SI" : "NO", workerNice_.load(), priorityError_.load(), mean, peak,
+            recentWall_.load(), recentCpu_.load(), recentPeak_.load(), haveWindow_.load() ? "" : "(aun sin ventana completa)",
+            RenderWindow::percent(cpuNs_.load(), uint64_t(frames)),
+            (unsigned long long)underruns_.load(), (unsigned long long)missing_.load(), xruns_.load(),
+            double(rendered_.load()) / 48000.0, (unsigned long long)midiBytes_.load(), (unsigned long long)dropped_.load(),
+            (unsigned long long)noDspFrames_.load(), (unsigned long long)signalFrames_.load(), signalPeak_.load());
+        std::lock_guard<std::mutex> lock(textMutex_);
+        return message_ + "\n\nLCD: " + lcd_ + "\n\n" + b;
+    }
+};
+Engine engine;
+}
+
+extern "C" {
+JNIEXPORT jstring JNICALL Java_org_rinoize_rims2000r_NativeBridge_start(JNIEnv* env, jclass, jstring dir, jint frames, jint device, jboolean dsp) {
+    if (!dir) return env->NewStringUTF("Directorio nulo");
+    const char* p = env->GetStringUTFChars(dir, nullptr);
+    if (!p) return nullptr;
+    const std::string path(p); env->ReleaseStringUTFChars(dir, p);
+    const auto result = engine.start(path, frames, device, dsp == JNI_TRUE);
+    return env->NewStringUTF(result.c_str());
+}
+JNIEXPORT void JNICALL Java_org_rinoize_rims2000r_NativeBridge_stop(JNIEnv*, jclass) { engine.stop(); }
+JNIEXPORT jint JNICALL Java_org_rinoize_rims2000r_NativeBridge_state(JNIEnv*, jclass) { return engine.state(); }
+JNIEXPORT jstring JNICALL Java_org_rinoize_rims2000r_NativeBridge_stats(JNIEnv* env, jclass) {
+    const auto s = engine.stats(); return env->NewStringUTF(s.c_str());
+}
+JNIEXPORT void JNICALL Java_org_rinoize_rims2000r_NativeBridge_volume(JNIEnv*, jclass, jfloat g) { engine.setVolume(g); }
+JNIEXPORT void JNICALL Java_org_rinoize_rims2000r_NativeBridge_panic(JNIEnv*, jclass) { engine.panic(); }
+JNIEXPORT void JNICALL Java_org_rinoize_rims2000r_NativeBridge_resetStats(JNIEnv*, jclass) { engine.resetStats(); }
+JNIEXPORT void JNICALL Java_org_rinoize_rims2000r_NativeBridge_midi(JNIEnv* env, jclass, jbyteArray bytes, jint offset, jint count) {
+    if (!bytes || offset < 0 || count <= 0 || count > 65536) return;
+    const jsize len = env->GetArrayLength(bytes);
+    if (offset > len || count > len - offset) return;
+    jbyte* p = env->GetByteArrayElements(bytes, nullptr);
+    if (!p) return;
+    engine.addMidi(reinterpret_cast<uint8_t*>(p + offset), uint32_t(count));
+    env->ReleaseByteArrayElements(bytes, p, JNI_ABORT);
+}
+}

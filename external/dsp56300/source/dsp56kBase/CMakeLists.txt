@@ -27,7 +27,7 @@ target_sources(dsp56kBase PRIVATE ${SOURCES})
 source_group("source" FILES ${SOURCES})
 
 # Profiler integrations, see profiler.cpp. vtuneSdk is only added for these platforms, Superluminal is Windows only.
-if(WIN32 OR (UNIX AND NOT APPLE))
+if(WIN32 OR (UNIX AND NOT APPLE AND NOT ANDROID))
 	target_link_libraries(dsp56kBase PRIVATE vtuneSdk)
 	target_compile_definitions(dsp56kBase PRIVATE DSP56K_USE_VTUNE_JIT_PROFILING_API)
 endif()
@@ -47,7 +47,11 @@ endif()
 if(UNIX AND NOT APPLE)
 	set(THREADS_PREFER_PTHREAD_FLAG ON)
 	find_package(Threads REQUIRED)
-	target_link_libraries(dsp56kBase PUBLIC Threads::Threads rt)
+	target_link_libraries(dsp56kBase PUBLIC Threads::Threads)
+    # Android Bionic has no separate librt.
+    if(NOT ANDROID)
+        target_link_libraries(dsp56kBase PUBLIC rt)
+    endif()
 endif()
 
 target_include_directories(dsp56kBase PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
