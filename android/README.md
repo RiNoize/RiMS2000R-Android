@@ -4,7 +4,7 @@ APK experimental ARM64 para Galaxy Tab A9. Núcleo original H8S/2350 + DSP56362;
 
 ## Cambios de 0.1.2
 
-- Perfil nativo explícito `-O3` + ThinLTO para H8S, DSP56300, AsmJit y puente Android. Los símbolos internos se ocultan; JNI mantiene exportaciones explícitas. El workflow comprueba los comandos efectivos del compilador.
+- Perfil nativo explícito `-O3` para todas las bibliotecas y ThinLTO para el núcleo H8S y el puente Android. DSP56300 y AsmJit se enlazan como bibliotecas independientes, sin ThinLTO, siguiendo el límite de optimización del núcleo en escritorio. JNI mantiene exportaciones explícitas. El workflow comprueba los comandos efectivos del compilador.
 - No se usa `-ffast-math`. No se cambian los relojes emulados, la frecuencia de 48 kHz, la polifonía, las interrupciones del DSP ni el bloque de render de 128 frames.
 - Prioridad de audio de mejor esfuerzo también para el hilo DSP opcional. La prioridad real del productor y el error de solicitud se muestran; no se requieren root ni prioridades RT privilegiadas.
 - Carga acumulada y ventana de dos segundos de audio emulado. Tiempo de CPU del productor separado del tiempo transcurrido: **no incluye el hilo DSP separado**, si se activa.

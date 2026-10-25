@@ -50,7 +50,21 @@ jobs:
           c++ -std=c++17 -O2 android/tests/render_window_test.cpp -o /tmp/rims-window-test
           /tmp/rims-window-test
       - name: Build installable ARM64 APK
-        run: gradle -p android :app:assembleDebug --no-daemon --stacktrace
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle -p android :app:assembleDebug --no-daemon --stacktrace 2>&1 | tee "$RUNNER_TEMP/rims-apk-build.log"
+      - name: Preserve native build failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rims-native-build-failure
+          path: |
+            ${{ runner.temp }}/rims-apk-build.log
+            android/app/.cxx/**/compile_commands.json
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 7
       - name: Verify effective native optimisation flags
         run: python3 android/tests/verify_native_flags.py
       - name: Download previous APK for certificate comparison
